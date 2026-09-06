@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AuraTrade Desk</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0e14; color: #dbe2ef;
+               font: 15px/1.6 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #frame { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; display: none; background: #0b0e14; }
+  #shade { position: fixed; inset: 0; display: grid; place-items: center; background: #0b0e14; }
+  .card { text-align: center; padding: 34px 26px; max-width: 420px; }
+  .logo { width: 56px; height: 56px; border-radius: 14px; margin: 0 auto 14px;
+          background: linear-gradient(135deg, #2b6cff, #7b2bff); display: grid; place-items: center;
+          font-weight: 800; font-size: 26px; color: #fff; }
+  h1 { font-size: 17px; letter-spacing: .08em; margin: 0 0 6px; }
+  #st { color: #7c8698; font-size: 13px; min-height: 44px; }
+  .spin { width: 22px; height: 22px; border: 3px solid #232c3e; border-top-color: #4b8bff; border-radius: 50%;
+          margin: 16px auto 0; animation: r 0.9s linear infinite; }
+  @keyframes r { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+  button { margin-top: 16px; background: linear-gradient(135deg, #2b6cff, #7b2bff); color: #fff; border: 0;
+           border-radius: 10px; padding: 11px 22px; font-size: 14px; font-weight: 700; cursor: pointer; display: none; }
+  .tip { margin-top: 18px; font-size: 12px; color: #5d6779; line-height: 1.5; }
+</style>
+</head>
+<body>
+<iframe id="frame" title="AuraTrade Desk" allow="autoplay"></iframe>
+<div id="shade">
+  <div class="card">
+    <div class="logo">A</div>
+    <h1>AURATRADE CAPITAL DESK</h1>
+    <div id="st">Finding the live desk…</div>
+    <div class="spin" id="sp"></div>
+    <button id="retry">Try again</button>
+    <div class="tip">Chrome menu → "Add to Home screen" — phir ye icon hamesha seedha desk kholega.</div>
+  </div>
+</div>
+<script>
+(function () {
+  'use strict';
+
+  /**
+   * THE DESK LAUNCHER.
+   *
+   * WHY THIS PAGE HOLDS THE DESK IN A FRAME instead of navigating to it.
+   * The tunnel's address is EPHEMERAL — localhost.run hands out a new random
+   * subdomain on every reconnect. The old launcher did location.replace() to
+   * that address, which put it in the address bar, the tab restore and the
+   * autocomplete. So the first open worked and the second landed the friend
+   * on a dead subdomain showing localhost.run's own "no tunnel here :(" page
+   * — reported by two people on 2026-09-05, and unfixable from that page
+   * because it is not ours. Now the top-level URL is always THIS file, and
+   * only the frame inside it points at whatever address is live right now.
+   *
+   * It also self-heals: the beacon is re-read on a timer, and if the tunnel
+   * has moved (or died and come back at a new address) the frame is pointed
+   * at the new one without anybody reloading anything.
+   */
+
+  /**
+   * TWO BUILDS OF ONE PAGE. The Frds file bakes the key in (it is handed
+   * out privately). The PUBLIC build — hosted at a stable https address so
+   * phones can "Add to Home screen" (his 2026-09-06 ask: opening a file every
+   * time is not workable) — bakes NOTHING: the key arrives once via ?key= on
+   * the invite link, is stored under this stable origin and stripped from
+   * the address bar, or is typed once into the box below. The beacon's own
+   * name is derived from the key at runtime, so the public page reveals
+   * neither the key nor where the beacon lives.
+   */
+  var KEY_BAKED = null;
+  var KEY_LS = 'auratrade-launcher-key';
+  var KEY = KEY_BAKED;
+  var BEACON_READS = [];
+  var MAX_AGE_MS = 1800000;
+  var FIXED = "https://auratrade-signals-pro.loca.lt";
+  var RECHECK_MS = 45000;
+
+  var st = document.getElementById('st');
+  var sp = document.getElementById('sp');
+  var shade = document.getElementById('shade');
+  var frame = document.getElementById('frame');
+  var retry = document.getElementById('retry');
+  var currentBase = null;
+  var checking = false;
+
+  var enc = new TextEncoder();
+  async function hmacHex(secret, text) {
+    var k = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    var sig = await crypto.subtle.sign('HMAC', k, enc.encode(text));
+    return Array.from(new Uint8Array(sig)).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+  }
+
+  // Same rules as shared/beacon.mjs verifyBeacon: https only, fresh, signature must match.
+  async function verify(record) {
+    try {
+      if (!record || typeof record.url !== 'string' || !record.sig) return null;
+      if (!/^https:\/\//.test(record.url)) return null;
+      var at = Number(record.at);
+      if (!isFinite(at) || Date.now() - at > MAX_AGE_MS) return null;
+      var expected = await hmacHex(KEY, record.url + '|' + at);
+      return expected === String(record.sig) ? record.url.replace(/\/+$/, '') : null;
+    } catch (e) { return null; }
+  }
+
+  async function readBeacon() {
+    for (var i = 0; i < BEACON_READS.length; i++) {
+      try {
+        var r = await fetch(BEACON_READS[i], { signal: AbortSignal.timeout(6000), cache: 'no-store' });
+        if (!r.ok) continue;
+        var url = await verify(await r.json());
+        if (url) return url;
+      } catch (e) { /* next store */ }
+    }
+    return null;
+  }
+
+  // A candidate must actually be OUR server before anyone is sent there.
+  async function alive(base) {
+    try {
+      var r = await fetch(base + '/api/ping', { signal: AbortSignal.timeout(5000), cache: 'no-store' });
+      if (!r.ok) return false;
+      var d = await r.json();
+      return !!(d && d.service === 'auratrade');
+    } catch (e) { return false; }
+  }
+
+  function show(base) {
+    if (base === currentBase && frame.style.display === 'block') return;
+    currentBase = base;
+    // The key rides in the query string exactly as before; the desk pockets it
+    // and strips it from ITS url. Nothing sensitive reaches this page's own bar.
+    frame.src = base + '/desk?key=' + encodeURIComponent(KEY);
+    frame.style.display = 'block';
+    shade.style.display = 'none';
+  }
+
+  function stall(message) {
+    shade.style.display = 'grid';
+    frame.style.display = 'none';
+    sp.style.display = 'none';
+    retry.style.display = 'inline-block';
+    st.innerHTML = message;
+  }
+
+  function searching(message) {
+    st.textContent = message;
+    sp.style.display = 'block';
+    retry.style.display = 'none';
+  }
+
+  /** Resolve the live address, preferring the beacon, then the fixed name. */
+  async function resolve() {
+    var fromBeacon = await readBeacon();
+    if (fromBeacon && await alive(fromBeacon)) return fromBeacon;
+    if (await alive(FIXED)) return FIXED;
+    // The beacon can outlive a just-died tunnel by a few minutes — trusting it
+    // blind is still better than telling a friend the desk is gone.
+    return fromBeacon || null;
+  }
+
+  /**
+   * The tunnel MOVES on a schedule — measured 2026-09-05: localhost.run's
+   * free tunnel goes dead roughly every twenty minutes and the keeper
+   * re-establishes it at a new address ~30 seconds later. So "the desk
+   * went dark" is a normal event here, not an outage: hide the dead frame
+   * (which would otherwise show localhost.run's own error page INSIDE it),
+   * say what is happening, and poll fast until the beacon names the new
+   * door. Then the frame follows.
+   */
+  var FAST_MS = 8000;
+  var fastTimer = null;
+  function fastPoll(on) {
+    if (on && !fastTimer) fastTimer = setInterval(function () { check(false); }, FAST_MS);
+    if (!on && fastTimer) { clearInterval(fastTimer); fastTimer = null; }
+  }
+  function reconnecting() {
+    shade.style.display = 'grid';
+    frame.style.display = 'none';
+    sp.style.display = 'block';
+    retry.style.display = 'none';
+    st.textContent = 'Desk is moving to a fresh address — reconnecting by itself…';
+    fastPoll(true);
+  }
+
+  async function check(initial) {
+    if (checking) return;
+    checking = true;
+    try {
+      if (initial) searching('Reading the beacon…');
+      var base = await resolve();
+      if (base) { fastPoll(false); show(base); return; }
+      // The beacon is silent. If the desk we already show still answers,
+      // this is a beacon blip and the reader keeps reading.
+      if (currentBase && await alive(currentBase)) return;
+      if (currentBase) { reconnecting(); return; }
+      stall('The desk is not reachable right now.<br>' +
+            'Most likely the host computer is offline (power or internet) — this page keeps trying by itself.');
+      fastPoll(true);
+    } finally { checking = false; }
+  }
+
+  retry.addEventListener('click', function () { searching('Looking again…'); check(true); });
+  // A phone that was asleep wakes with a stale frame; re-resolve on return.
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) check(false); });
+
+  /**
+   * THE STABLE HALF OF THE DESK. This page's address never changes; the
+   * desk's does (every ~20 minutes), and each new address is a new origin
+   * with empty localStorage and no notification permission — which is why
+   * the desk kept asking "enable alerts" again and forgot the sound toggle
+   * (his 2026-09-05 complaint). So the desk hands its preferences here, and
+   * browser notifications are shown by THIS page under its own permission.
+   * Messages are accepted only from the frame this page created.
+   */
+  var PREFS_LS = 'auratrade-launcher-prefs';
+  function prefs() { try { return JSON.parse(localStorage.getItem(PREFS_LS) || '{}') || {}; } catch (e) { return {}; } }
+  function savePrefs(p) { try { localStorage.setItem(PREFS_LS, JSON.stringify(p)); } catch (e) {} }
+  function tellPrefs() {
+    var p = prefs();
+    try {
+      frame.contentWindow.postMessage({
+        auratrade: true, type: 'prefs',
+        sound: typeof p.sound === 'boolean' ? p.sound : true,
+        range: p.range || null,
+        notifPermission: ('Notification' in window) ? Notification.permission : 'unsupported',
+      }, '*');
+    } catch (e) {}
+  }
+  function askNotif() {
+    if (!('Notification' in window) || Notification.permission !== 'default') { tellPrefs(); return; }
+    // The tap happened inside the frame; activation reaches this window too,
+    // so the prompt usually opens straight away. If the browser refuses, the
+    // desk keeps showing its chip and the next tap tries again.
+    Notification.requestPermission().then(tellPrefs, tellPrefs);
+  }
+  window.addEventListener('message', function (ev) {
+    if (!frame.contentWindow || ev.source !== frame.contentWindow) return;
+    var d = ev.data;
+    if (!d || d.auratrade !== true) return;
+    if (d.type === 'hello') { tellPrefs(); return; }
+    if (d.type === 'prefs') {
+      var p = prefs();
+      if (typeof d.sound === 'boolean') p.sound = d.sound;
+      if (d.range && d.range.mode) p.range = d.range;
+      savePrefs(p);
+      return;
+    }
+    if (d.type === 'notif-request') { askNotif(); return; }
+    if (d.type === 'notify') {
+      try {
+        if (!('Notification' in window) || Notification.permission !== 'granted' || !document.hidden) return;
+        var n = new Notification(String(d.title || 'AuraTrade'), { body: String(d.body || ''), tag: 'auratrade-desk', renotify: true });
+        n.onclick = function () { try { window.focus(); } catch (e) {} n.close(); };
+      } catch (e) { /* no notification support here — the desk's toast and sound still fire */ }
+    }
+  });
+
+  /** The beacon's name is a pure function of the key — same rule as shared/beacon.mjs beaconKeyFor. */
+  async function beaconReadsFor(k) {
+    var h = await crypto.subtle.digest('SHA-256', enc.encode('auratrade-beacon:' + k));
+    var bk = 'auratrade-' + Array.from(new Uint8Array(h)).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('').slice(0, 24);
+    return ['https://textdb.dev/api/data/' + bk, 'https://textdb.online/' + bk];
+  }
+  function askKeyThenStart() {
+    sp.style.display = 'none';
+    retry.style.display = 'none';
+    st.innerHTML = 'Access key daalo (ek hi baar — ye phone yaad rakhega):' +
+      '<div style="margin-top:10px"><input id="kIn" type="password" placeholder="Access key" autocomplete="off" ' +
+      'style="width:100%;max-width:300px;background:#151b28;border:1px solid #232c3e;color:#dbe2ef;border-radius:10px;padding:10px 12px;font-size:14px"></div>';
+    var go = document.createElement('button');
+    go.textContent = 'Open the desk';
+    go.style.display = 'inline-block';
+    st.appendChild(go);
+    var submit = function () {
+      var v = (document.getElementById('kIn').value || '').trim();
+      if (!v) return;
+      try { localStorage.setItem(KEY_LS, v); } catch (e) {}
+      go.remove();
+      start(v);
+    };
+    go.onclick = submit;
+    document.getElementById('kIn').addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
+  }
+  async function start(k) {
+    KEY = k;
+    BEACON_READS = await beaconReadsFor(k);
+    searching('Reading the beacon…');
+    check(true);
+    setInterval(function () { check(false); }, RECHECK_MS);
+  }
+  (function () {
+    var k = KEY_BAKED;
+    if (!k) {
+      var q = new URLSearchParams(location.search);
+      if (q.get('key')) {
+        k = q.get('key').trim();
+        try { localStorage.setItem(KEY_LS, k); } catch (e) {}
+        q.delete('key');
+        try { history.replaceState(null, '', location.pathname + (q.toString() ? '?' + q : '')); } catch (e) {}
+      }
+      if (!k) { try { k = localStorage.getItem(KEY_LS) || ''; } catch (e) { k = ''; } }
+    }
+    if (k) start(k); else askKeyThenStart();
+  })();
+})();
+</script>
+</body>
+</html>
