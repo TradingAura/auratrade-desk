@@ -661,41 +661,7 @@
     if (k) start(k)['catch'](function () { stall(sawResponse ? DESK_DOWN : CANNOT_REACH); });
     else askKeyThenStart();
     try {
-      if ('serviceWorker' in navigator) {
-        /**
-         * A NEW SHELL TAKES EFFECT ON THIS OPEN, NOT THE NEXT ONE.
-         *
-         * TWO SIGNALS, because they catch different things.
-         * controllerchange fires only when sw.js ITSELF changed — but the
-         * file that usually changes is index.html, and then the reader sits
-         * on the old launcher with the worker none the wiser. So the worker
-         * also compares what it just served against what is published and
-         * posts a message when they differ. That message is the one that
-         * actually matters.
-         *
-         * THREE GUARDS on the reload, because a reload loop here would be
-         * unrecoverable for someone with no way to reach the code: never on
-         * a first install (there was no controller to change), once per tab
-         * session, and only when sessionStorage really works — if it throws,
-         * the reload is skipped and the update lands next open, which is
-         * the old behaviour and safe.
-         */
-        var had = !!navigator.serviceWorker.controller;
-        var reloadOnce = function () {
-          try {
-            if (sessionStorage.getItem('auratrade-sw-reloaded') === '1') return;
-            sessionStorage.setItem('auratrade-sw-reloaded', '1');
-          } catch (e) { return; }
-          location.reload();
-        };
-        navigator.serviceWorker.register('sw.js')['catch'](function () {});
-        navigator.serviceWorker.addEventListener('controllerchange', function () {
-          if (had) reloadOnce();
-        });
-        navigator.serviceWorker.addEventListener('message', function (ev) {
-          if (ev.data && ev.data.auratrade === 'shell-updated') reloadOnce();
-        });
-      }
+      if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js')['catch'](function () {});
     } catch (e) {}
   })();
 })();
