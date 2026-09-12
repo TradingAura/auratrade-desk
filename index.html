@@ -208,14 +208,28 @@
   async function hmacHex(secret, text) { return hmacHexJs(secret, text); }
 
   // Same rules as shared/beacon.mjs verifyBeacon: https only, fresh, signature must match.
+  /**
+   * A SIGNED, IN-DATE RECORD IS PROOF THE HOST IS ALIVE, even when the address
+   * in it is not usable. Only the host can sign one, and it republishes every
+   * five minutes — so "we read a record from four minutes ago" and "that PC is
+   * off" cannot both be true. He was shown exactly that contradiction on
+   * 2026-09-12: this page said his host was off while he was sitting at it.
+   *
+   * Recorded BEFORE the https test, because a retraction (url 'none', signed
+   * the same way) is the host talking too — it is the keeper saying "I am here
+   * and I am between addresses", which is the most useful thing it can say.
+   */
+  var hostSpokeAt = 0;
   async function verify(record) {
     try {
       if (!record || typeof record.url !== 'string' || !record.sig) return null;
-      if (!/^https:\/\//.test(record.url)) return null;
       var at = Number(record.at);
       if (!isFinite(at) || Date.now() - at > MAX_AGE_MS) return null;
       var expected = await hmacHex(KEY, record.url + '|' + at);
-      return expected === String(record.sig) ? record.url.replace(/\/+$/, '') : null;
+      if (expected !== String(record.sig)) return null;
+      if (at > hostSpokeAt) hostSpokeAt = at;
+      if (!/^https:\/\//.test(record.url)) return null;
+      return record.url.replace(/\/+$/, '');
     } catch (e) { return null; }
   }
 
@@ -350,6 +364,14 @@
     'To fix that second one, once: tap the <b>\u22ee</b> menu at the top right and choose ' +
     '<b>Open in browser</b>, or save the file and open it with <b>Chrome</b>. Open it from there after that.';
 
+  /**
+   * How recently the host must have signed something for "it is moving, not
+   * gone" to be the honest answer. The keeper republishes every five minutes,
+   * so ten is two missed republishes — long enough to ride out a store blip,
+   * short enough that a PC which really did lose power stops being covered for.
+   */
+  var HOST_RECENT_MS = 10 * 60 * 1000;
+
   var FAST_MS = 8000;
   var fastTimer = null;
   function fastPoll(on) {
@@ -397,6 +419,16 @@
        * wrong instruction is worse than none. If not a single http request has
        * completed, whether the desk is up is not the question yet.
        */
+      /**
+       * THE HOST IS NOT OFF IF IT WAS TALKING A MOMENT AGO.
+       *
+       * This branch used to be reached by every reader whose page had not yet
+       * connected once — a fresh load, or a reload — and it said the host PC
+       * was off. On 2026-09-12 he loaded it during a tunnel move and read that
+       * about the machine he was sitting at. The beacon settles it: it is
+       * signed, it carries its own timestamp, and only the host can write one.
+       */
+      if (Date.now() - hostSpokeAt < HOST_RECENT_MS) { reconnecting(); return; }
       stall(sawResponse ? DESK_DOWN : CANNOT_REACH);
       fastPoll(true);
     } finally { checking = false; }
