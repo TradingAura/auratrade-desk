@@ -45,6 +45,17 @@ self.addEventListener('fetch', function (e) {
       // is merely slow still ends up in the cache for next time.
       return fromCache(req).then(function (hit) { return hit || net; });
     }));
+    /**
+     * AND THE WORKER IS HELD OPEN UNTIL THE STORE FINISHES.
+     *
+     * respondWith only keeps it alive until the RESPONSE settles, and on a
+     * fast network that is long before c.put() has written anything. Without
+     * this line the shell was never actually stored — measured 2026-09-12
+     * against a poisoned cache: the network copy was served correctly and the
+     * cache still held the old one afterwards. Which would have left the
+     * offline fallback, the entire reason this worker exists, not working.
+     */
+    e.waitUntil(net['catch'](function () {}));
     return;
   }
 
