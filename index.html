@@ -270,16 +270,75 @@
     });
   }
 
+  /**
+   * EVERY address the host published, primary first.
+   *
+   * The host keeps a spare tunnel open beside the live one and publishes both
+   * in the one signed record (shared/beacon.mjs). Holding the spare is what
+   * turns a tunnel move from a minute of "not reachable" into one request:
+   * there is nothing to wait to be told.
+   *
+   * The spare list is covered by its own signature and is DROPPED whole if it
+   * does not verify — the beacon is signed precisely so that nobody can add an
+   * address to it, and a half-trusted list would give that away.
+   */
+  async function verifyUrls(record) {
+    var primary = await verify(record);
+    if (!primary) return [];
+    var alt = (record && record.alt && record.alt.length) ? record.alt : null;
+    if (!alt || !record.sigAll) return [primary];
+    try {
+      var expected = await hmacHex(KEY, [record.url].concat(alt).join(',') + '|' + Number(record.at));
+      if (expected !== String(record.sigAll)) return [primary];
+    } catch (e) { return [primary]; }
+    var out = [primary];
+    for (var i = 0; i < alt.length; i++) {
+      // No regex here on purpose. A slash inside one has to survive TWO
+      // template literals on the way into the page, and it did not: the page
+      // received //+$/ and would not parse at all — the whole launcher, dead,
+      // from one escape. Trailing slashes come off by hand instead.
+      var u = String(alt[i] || '');
+      while (u.charAt(u.length - 1) === '/') u = u.slice(0, -1);
+      if (u.indexOf('https://') === 0 && out.indexOf(u) < 0) out.push(u);
+    }
+    return out;
+  }
+
   async function readBeacon() {
     for (var i = 0; i < BEACON_READS.length; i++) {
       try {
         var r = await fetchT(BEACON_READS[i], 6000);
         if (!r.ok) continue;
-        var url = await verify(await r.json());
-        if (url) return url;
+        var urls = await verifyUrls(await r.json());
+        if (urls.length) return urls;
       } catch (e) { /* next store */ }
     }
-    return null;
+    return [];
+  }
+
+  /**
+   * ALL AT ONCE, then the most preferred one that answered.
+   *
+   * One at a time was the "atak jana" he complained about: a dead address
+   * costs its whole timeout before the live one is even asked, so the page sat
+   * there for fifteen seconds deciding something it could have decided in one.
+   * Preference order is kept rather than taking whoever is fastest, because
+   * "whoever is fastest" flaps between two healthy tunnels on every poll.
+   */
+  function firstAlive(list) {
+    return new Promise(function (done) {
+      if (!list.length) return done(null);
+      var results = new Array(list.length);
+      var left = list.length;
+      list.forEach(function (base, i) {
+        alive(base).then(function (ok) {
+          results[i] = ok;
+          if (--left) return;
+          for (var j = 0; j < list.length; j++) if (results[j]) return done(list[j]);
+          done(null);
+        });
+      });
+    });
   }
 
   // A candidate must actually be OUR server before anyone is sent there.
@@ -336,10 +395,15 @@
    * '*', so a file:// page (Origin: null) can make it. Verified 2026-09-11.
    */
   async function resolve() {
-    var fromBeacon = await readBeacon();
-    if (fromBeacon && await alive(fromBeacon)) return fromBeacon;
-    if (await alive(FIXED)) return FIXED;
-    return null;
+    var list = await readBeacon();
+    // The one we are already showing goes first: two healthy addresses must
+    // not make the frame jump between them on every poll.
+    if (currentBase && list.indexOf(currentBase) > 0) {
+      list = [currentBase].concat(list.filter(function (u) { return u !== currentBase; }));
+    }
+    // The fixed name is a last resort, not a step to wait through.
+    if (list.indexOf(FIXED) < 0) list.push(FIXED);
+    return await firstAlive(list);
   }
 
   /**
@@ -372,7 +436,10 @@
    */
   var HOST_RECENT_MS = 10 * 60 * 1000;
 
-  var FAST_MS = 8000;
+  // Eight seconds was a long time to look at an error screen when the answer
+  // is one request away. The probes are parallel now, so a poll costs about as
+  // much as the slowest single address.
+  var FAST_MS = 2500;
   var fastTimer = null;
   function fastPoll(on) {
     if (on && !fastTimer) fastTimer = setInterval(function () { check(false); }, FAST_MS);
@@ -550,12 +617,34 @@
   (function () {
     var k = KEY_BAKED;
     if (!k) {
+      /**
+       * THE KEY MAY ARRIVE IN THE FRAGMENT, AND THAT IS THE FORM TO SHARE.
+       *
+       * A fragment is never put into an HTTP request. Not by the browser, not
+       * by a messenger fetching the page to draw a preview card, not in a
+       * Referer header. So #key=... reaches this script and nothing else:
+       * GitHub's access logs never see it, and neither does any intermediary
+       * along the way. ?key=... sits in the request line, and every one of
+       * them sees that.
+       *
+       * Both are accepted. The ?key= form was already handed out on
+       * 2026-09-12 and has to keep working; #key= is what gets shared now.
+       */
       var q = new URLSearchParams(location.search);
-      if (q.get('key')) {
-        k = q.get('key').trim();
+      var h = new URLSearchParams(String(location.hash || '').replace(/^#/, ''));
+      var arrived = (h.get('key') || q.get('key') || '').trim();
+      if (arrived) {
+        k = arrived;
         try { localStorage.setItem(KEY_LS, k); } catch (e) {}
+        // Out of the address bar either way, so a screenshot of this phone
+        // does not carry it and a reload cannot re-leak it.
         q.delete('key');
-        try { history.replaceState(null, '', location.pathname + (q.toString() ? '?' + q : '')); } catch (e) {}
+        h.delete('key');
+        var rest = h.toString();
+        try {
+          history.replaceState(null, '', location.pathname
+            + (q.toString() ? '?' + q : '') + (rest ? '#' + rest : ''));
+        } catch (e) {}
       }
       if (!k) { try { k = localStorage.getItem(KEY_LS) || ''; } catch (e) { k = ''; } }
     }
@@ -572,7 +661,41 @@
     if (k) start(k)['catch'](function () { stall(sawResponse ? DESK_DOWN : CANNOT_REACH); });
     else askKeyThenStart();
     try {
-      if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js')['catch'](function () {});
+      if ('serviceWorker' in navigator) {
+        /**
+         * A NEW SHELL TAKES EFFECT ON THIS OPEN, NOT THE NEXT ONE.
+         *
+         * TWO SIGNALS, because they catch different things.
+         * controllerchange fires only when sw.js ITSELF changed — but the
+         * file that usually changes is index.html, and then the reader sits
+         * on the old launcher with the worker none the wiser. So the worker
+         * also compares what it just served against what is published and
+         * posts a message when they differ. That message is the one that
+         * actually matters.
+         *
+         * THREE GUARDS on the reload, because a reload loop here would be
+         * unrecoverable for someone with no way to reach the code: never on
+         * a first install (there was no controller to change), once per tab
+         * session, and only when sessionStorage really works — if it throws,
+         * the reload is skipped and the update lands next open, which is
+         * the old behaviour and safe.
+         */
+        var had = !!navigator.serviceWorker.controller;
+        var reloadOnce = function () {
+          try {
+            if (sessionStorage.getItem('auratrade-sw-reloaded') === '1') return;
+            sessionStorage.setItem('auratrade-sw-reloaded', '1');
+          } catch (e) { return; }
+          location.reload();
+        };
+        navigator.serviceWorker.register('sw.js')['catch'](function () {});
+        navigator.serviceWorker.addEventListener('controllerchange', function () {
+          if (had) reloadOnce();
+        });
+        navigator.serviceWorker.addEventListener('message', function (ev) {
+          if (ev.data && ev.data.auratrade === 'shell-updated') reloadOnce();
+        });
+      }
     } catch (e) {}
   })();
 })();
