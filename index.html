@@ -339,7 +339,7 @@
    */
   async function readBeacon() {
     var records = await Promise.all(BEACON_READS.map(function (url) {
-      return fetchT(url, 6000)
+      return fetchT(url, 4000)
         .then(function (r) { return r.ok ? r.json() : null; })
         .catch(function () { return null; });
     }));
@@ -374,12 +374,26 @@
       if (!list.length) return done(null);
       var results = new Array(list.length);
       var left = list.length;
+      var settled = false;
+      function checkEarly() {
+        if (settled) return;
+        for (var j = 0; j < list.length; j++) {
+          if (results[j] === true) {
+            settled = true;
+            return done(list[j]);
+          }
+          if (results[j] === undefined) break;
+        }
+      }
       list.forEach(function (base, i) {
         alive(base).then(function (ok) {
           results[i] = ok;
+          checkEarly();
           if (--left) return;
-          for (var j = 0; j < list.length; j++) if (results[j]) return done(list[j]);
-          done(null);
+          if (!settled) {
+            for (var j = 0; j < list.length; j++) if (results[j]) return done(list[j]);
+            done(null);
+          }
         });
       });
     });
@@ -396,7 +410,11 @@
   }
 
   function show(base) {
-    if (base === currentBase && frame.style.display === 'block') return;
+    if (base === currentBase) {
+      frame.style.display = 'block';
+      shade.style.display = 'none';
+      return;
+    }
     currentBase = base;
     // The key rides in the query string exactly as before; the desk pockets it
     // and strips it from ITS url. Nothing sensitive reaches this page's own bar.
@@ -517,7 +535,8 @@
       if (base) { fastPoll(false); show(base); return; }
       // The beacon is silent. If the desk we already show still answers,
       // this is a beacon blip and the reader keeps reading.
-      if (currentBase && await alive(currentBase)) return;
+      if (currentBase && await alive(currentBase)) { fastPoll(false); show(currentBase); return; }
+      if (!initial && currentBase && frame.style.display === 'block') { fastPoll(true); return; }
       if (currentBase) { reconnecting(); return; }
       /**
        * THE ONLY SCREENS ANYONE SEES WHEN IT IS BROKEN, so they say what to do
