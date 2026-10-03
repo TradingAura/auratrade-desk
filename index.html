@@ -245,10 +245,12 @@
    * spinner in his second screenshot: nothing on that screen was broken
    * except this.
    *
-   * sawResponse records whether ANY http request completed, whatever its
-   * status. False after a full round means this page cannot reach the
+   * sawResponse records whether ANY http response reached its headers,
+   * whatever its status. False after a full round means this page cannot reach the
    * internet from where it was opened — a different problem from the desk
    * being down, and it gets a different screen.
+   * The timer remains active through JSON parsing: a store or tunnel that sends
+   * headers but stalls its body must not hold the whole launcher indefinitely.
    */
   var sawResponse = false;
   function fetchT(url, ms) {
@@ -264,8 +266,21 @@
         try { if (ctl) ctl.abort(); } catch (e) {}
         reject(new Error('timeout'));
       }, ms);
-      var ok = function (r) { if (settled) return; settled = true; clearTimeout(timer); sawResponse = true; resolve(r); };
-      var no = function (e) { if (settled) return; settled = true; clearTimeout(timer); reject(e); };
+      var finish = function (fn, value) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        fn(value);
+      };
+      var no = function (e) { finish(reject, e); };
+      var ok = function (r) {
+        if (settled) return;
+        sawResponse = true;
+        if (!r.ok) { finish(resolve, { ok: false, data: null }); return; }
+        try {
+          r.json().then(function (data) { finish(resolve, { ok: true, data: data }); }, no);
+        } catch (e) { no(e); }
+      };
       try { fetch(url, opts).then(ok, no); } catch (e) { no(e); }
     });
   }
@@ -340,7 +355,7 @@
   async function readBeacon() {
     var records = await Promise.all(BEACON_READS.map(function (url) {
       return fetchT(url, 4000)
-        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (r) { return r.ok ? r.data : null; })
         .catch(function () { return null; });
     }));
     var best = null;
@@ -404,7 +419,7 @@
     try {
       var r = await fetchT(base + '/api/ping', 5000);
       if (!r.ok) return false;
-      var d = await r.json();
+      var d = r.data;
       return !!(d && d.service === 'auratrade');
     } catch (e) { return false; }
   }
