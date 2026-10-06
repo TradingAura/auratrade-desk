@@ -85,6 +85,30 @@
   var RECHECK_MS = 45000;
   var MOBILE_SHELL = true;
   var mobileSnapshots = {};
+  var savedMobileViewShown = false;
+  function mobileViewStorageKey() { return 'auratrade-mobile-view-v1-' + sha256HexJs('saved-view:' + KEY); }
+  function readSavedMobileView() {
+    if (!KEY) return null;
+    try {
+      var saved = JSON.parse(localStorage.getItem(mobileViewStorageKey()) || 'null');
+      if (!saved || !Array.isArray(saved.snapshot) || typeof saved.at !== 'number' || !isFinite(saved.at) || saved.at > Date.now() || Date.now() - saved.at > 24 * 60 * 60 * 1000) return null;
+      return saved;
+    } catch (e) { return null; }
+  }
+  function saveMobileView(snapshot) {
+    if (!MOBILE_SHELL || !KEY || !Array.isArray(snapshot)) return;
+    try { localStorage.setItem(mobileViewStorageKey(), JSON.stringify({ at: Date.now(), snapshot: snapshot })); } catch (e) {}
+  }
+  function previewMobileView() {
+    if (!MOBILE_SHELL || !mobileShellReady || mobileShellConnected || savedMobileViewShown) return;
+    var saved = readSavedMobileView();
+    if (!saved) return;
+    savedMobileViewShown = true;
+    frame.style.display = 'block';
+    shade.style.display = 'none';
+    frame.contentWindow.postMessage({ auratrade: true, type: 'mobile-preview', key: KEY, snapshot: saved.snapshot, at: saved.at }, location.origin);
+    connectionTrace('Saved view shown; fresh data pending');
+  }
   var connectionStartedAt = Date.now();
   var connectionLog = [];
   var diagnosticMode = new URLSearchParams(location.search).get('diagnostics') === '1';
@@ -123,11 +147,12 @@
   function prepareMobileShell() {
     if (!MOBILE_SHELL || mobileShellStarted) return;
     mobileShellStarted = true;
-    frame.src = 'mobile-desk.html';
+    frame.src = 'mobile-desk-v2.html';
   }
   function connectMobileShell() {
     if (!mobileShellReady || !currentBase || mobileShellConnected || !Array.isArray(mobileSnapshots[currentBase])) return;
     mobileShellConnected = true;
+    savedMobileViewShown = false;
     frame.contentWindow.postMessage({ auratrade: true, type: 'mobile-connect', base: currentBase, key: KEY, snapshot: mobileSnapshots[currentBase] }, location.origin);
   }
   var frameReadyTimer = null;
@@ -497,6 +522,7 @@
       if (needsSnapshot) {
         if (!r.ok || !Array.isArray(r.data)) return false;
         mobileSnapshots[base] = r.data;
+        saveMobileView(r.data);
         return true;
       }
       if (!r.ok) return false;
@@ -529,6 +555,7 @@
   }
 
   function stall(message) {
+    if (MOBILE_SHELL && savedMobileViewShown) { fastPoll(true); return; }
     shade.style.display = 'grid';
     frame.style.display = 'none';
     sp.style.display = 'none';
@@ -606,6 +633,14 @@
 
   async function resolve() {
     if (!currentBase) return await resolveStartup();
+    if (MOBILE_SHELL) {
+      var active = currentBase;
+      if (await alive(active)) return active;
+      // A new mobile session requires a full authenticated snapshot, not ping alone.
+      failedFrames[active] = Date.now() + 15000;
+      currentBase = null;
+      return await resolveStartup();
+    }
     var list = await readBeacon();
     // The one we are already showing goes first: two healthy addresses must
     // not make the frame jump between them on every poll.
@@ -762,8 +797,10 @@
       connectionTrace('Mobile UI loaded');
       mobileShellReady = true;
       connectMobileShell();
+      previewMobileView();
       return;
     }
+    if (MOBILE_SHELL && d.type === 'mobile-snapshot' && currentBase && d.base === currentBase) { saveMobileView(d.snapshot); return; }
     if (MOBILE_SHELL && d.type === 'route-error' && currentBase && d.base === currentBase) {
       connectionTrace('Live stream interrupted; retrying backup');
       failedFrames[currentBase] = Date.now() + 15000;
