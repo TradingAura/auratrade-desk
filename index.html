@@ -90,6 +90,24 @@
   var frame = document.getElementById('frame');
   var retry = document.getElementById('retry');
   var currentBase = null;
+  var frameReadyTimer = null;
+  var failedFrames = {};
+  function deskReady() {
+    if (frameReadyTimer) clearTimeout(frameReadyTimer);
+    frameReadyTimer = null;
+  }
+  function watchDeskReady(base) {
+    deskReady();
+    frameReadyTimer = setTimeout(function () {
+      if (currentBase !== base) return;
+      failedFrames[base] = Date.now() + 45000;
+      currentBase = null;
+      frame.style.display = 'none';
+      shade.style.display = 'grid';
+      searching('The desk page did not load. Trying another verified connection…');
+      check(true);
+    }, 20000);
+  }
   var checking = false;
 
   /**
@@ -354,7 +372,7 @@
    */
   async function readBeacon(onCandidate) {
     var records = await Promise.all(BEACON_READS.map(function (url) {
-      return fetchT(url, 4000)
+      return fetchT(url, 10000)
         .then(async function (r) {
           var record = r.ok ? r.data : null;
           if (record && onCandidate) {
@@ -423,8 +441,9 @@
 
   // A candidate must actually be OUR server before anyone is sent there.
   async function alive(base) {
+    if (failedFrames[base] > Date.now()) return false;
     try {
-      var r = await fetchT(base + '/api/ping', 5000);
+      var r = await fetchT(base + '/api/ping', 15000);
       if (!r.ok) return false;
       var d = r.data;
       return !!(d && d.service === 'auratrade');
@@ -440,6 +459,7 @@
     currentBase = base;
     // The key rides in the query string exactly as before; the desk pockets it
     // and strips it from ITS url. Nothing sensitive reaches this page's own bar.
+    watchDeskReady(base);
     frame.src = base + '/desk?key=' + encodeURIComponent(KEY);
     frame.style.display = 'block';
     shade.style.display = 'none';
@@ -668,7 +688,7 @@
     if (!frame.contentWindow || ev.source !== frame.contentWindow) return;
     var d = ev.data;
     if (!d || d.auratrade !== true) return;
-    if (d.type === 'hello') { tellPrefs(); return; }
+    if (d.type === 'hello') { deskReady(); tellPrefs(); return; }
     if (d.type === 'prefs') {
       var p = prefs();
       if (typeof d.sound === 'boolean') p.sound = d.sound;
