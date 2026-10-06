@@ -2326,8 +2326,8 @@
     es.addEventListener('pnl', function (ev) {
       try { lastPnlPush = Date.now(); applyPnl(JSON.parse(ev.data)); } catch (e) {}
     });
-    es.onopen = function () { lastStreamOk = Date.now(); if (deskDataLoaded) render(); };
-    es.onerror = function () { post({ type: 'route-error', base: serverBase }); if (deskDataLoaded) render(); else loadFallback(); migrateIfMoved(); /* EventSource retries by itself */ };
+    es.onopen = function () { clearMobileStreamFailure(); lastStreamOk = Date.now(); if (deskDataLoaded) render(); };
+    es.onerror = function () { reportMobileStreamFailure(); if (deskDataLoaded) render(); else loadFallback(); migrateIfMoved(); /* EventSource retries by itself */ };
   }
 
   function startDeskFeeds() {
@@ -2367,6 +2367,19 @@
     });
   }
 
+  var mobileStreamFailureTimer = null;
+  function clearMobileStreamFailure() {
+    if (mobileStreamFailureTimer !== null) clearTimeout(mobileStreamFailureTimer);
+    mobileStreamFailureTimer = null;
+  }
+  function reportMobileStreamFailure() {
+    if (mobileStreamFailureTimer !== null) return;
+    var failedBase = serverBase;
+    mobileStreamFailureTimer = setTimeout(function () {
+      mobileStreamFailureTimer = null;
+      if (serverBase === failedBase && (!es || es.readyState !== 1)) post({ type: 'route-error', base: failedBase });
+    }, 8000);
+  }
   function clearMobileSavedView() {
     var banner = document.getElementById('mobile-saved-banner');
     if (banner) banner.remove();
