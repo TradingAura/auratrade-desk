@@ -2,7 +2,7 @@
   "name": "AuraTrade Desk",
   "short_name": "AuraTrade",
   "description": "Live signals from the AuraTrade host.",
-  "start_url": "./",
+  "start_url": "./mobile.html",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
