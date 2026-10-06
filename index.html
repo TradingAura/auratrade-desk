@@ -83,6 +83,16 @@
   var MAX_AGE_MS = 1800000;
   var FIXED = "https://auratrade-signals-pro.loca.lt";
   var RECHECK_MS = 45000;
+  var MOBILE_SHELL = true;
+  var mobileSnapshots = {};
+  var mobileProbeControllers = {};
+  function cancelMobileProbes(winner) {
+    Object.keys(mobileProbeControllers).forEach(function (url) {
+      if (url.indexOf(winner + '/api/signals') === 0) return;
+      try { mobileProbeControllers[url].abort(); } catch (e) {}
+      delete mobileProbeControllers[url];
+    });
+  }
 
   var st = document.getElementById('st');
   var sp = document.getElementById('sp');
@@ -275,19 +285,24 @@
     var ctl = null;
     try { ctl = new AbortController(); } catch (e) { /* older WebView: the timer still fires */ }
     var opts = { cache: 'no-store' };
+    if (arguments[2]) opts.headers = arguments[2];
     if (ctl) opts.signal = ctl.signal;
+    var probeControllers = typeof mobileProbeControllers !== 'undefined' ? mobileProbeControllers : null;
+    if (ctl && probeControllers && arguments[2]) probeControllers[url] = ctl;
     return new Promise(function (resolve, reject) {
       var settled = false;
       var timer = setTimeout(function () {
         if (settled) return;
         settled = true;
         try { if (ctl) ctl.abort(); } catch (e) {}
+        if (probeControllers && probeControllers[url] === ctl) delete probeControllers[url];
         reject(new Error('timeout'));
       }, ms);
       var finish = function (fn, value) {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        if (probeControllers && probeControllers[url] === ctl) delete probeControllers[url];
         fn(value);
       };
       var no = function (e) { finish(reject, e); };
@@ -443,7 +458,13 @@
   async function alive(base) {
     if (failedFrames[base] > Date.now()) return false;
     try {
-      var r = await fetchT(base + '/api/ping', 15000);
+      var needsSnapshot = MOBILE_SHELL && !currentBase;
+      var r = await fetchT(base + (needsSnapshot ? '/api/signals' : '/api/ping'), needsSnapshot ? 20000 : 15000, needsSnapshot ? { 'X-AuraTrade-Key': KEY } : null);
+      if (needsSnapshot) {
+        if (!r.ok || !Array.isArray(r.data)) return false;
+        mobileSnapshots[base] = r.data;
+        return true;
+      }
       if (!r.ok) return false;
       var d = r.data;
       return !!(d && d.service === 'auratrade');
@@ -460,7 +481,7 @@
     // The key rides in the query string exactly as before; the desk pockets it
     // and strips it from ITS url. Nothing sensitive reaches this page's own bar.
     watchDeskReady(base);
-    frame.src = base + '/desk?key=' + encodeURIComponent(KEY);
+    frame.src = MOBILE_SHELL ? 'mobile-desk.html' : base + '/desk?key=' + encodeURIComponent(KEY);
     frame.style.display = 'block';
     shade.style.display = 'none';
   }
@@ -510,12 +531,18 @@
         if (!settled && discovered && !pending) { settled = true; done(null); }
       }
       function probe(urls) {
+        if (settled) return;
+        if (typeof MOBILE_SHELL !== 'undefined' && MOBILE_SHELL && urls.length) searching('Connecting to live data…');
         urls.forEach(function (base) {
           if (seen[base]) return;
           seen[base] = true;
           pending++;
           alive(base).then(function (ok) {
-            if (ok && !settled) { settled = true; done(base); }
+            if (ok && !settled) {
+              settled = true;
+              if (typeof cancelMobileProbes === 'function') cancelMobileProbes(base);
+              done(base);
+            }
           }).catch(function () {}).then(function () { pending--; finish(); });
         });
       }
@@ -688,6 +715,17 @@
     if (!frame.contentWindow || ev.source !== frame.contentWindow) return;
     var d = ev.data;
     if (!d || d.auratrade !== true) return;
+    if (MOBILE_SHELL && ev.origin !== location.origin) return;
+    if (MOBILE_SHELL && d.type === 'mobile-ready') {
+      frame.contentWindow.postMessage({ auratrade: true, type: 'mobile-connect', base: currentBase, key: KEY, snapshot: mobileSnapshots[currentBase] || [] }, location.origin);
+      return;
+    }
+    if (MOBILE_SHELL && d.type === 'route-error' && currentBase && d.base === currentBase) {
+      failedFrames[currentBase] = Date.now() + 15000;
+      currentBase = null;
+      check(true);
+      return;
+    }
     if (d.type === 'hello') { deskReady(); tellPrefs(); return; }
     if (d.type === 'prefs') {
       var p = prefs();
