@@ -352,10 +352,17 @@
    * and shrugs off a throttled write) could serve an older address while the
    * current one sat in the other store.
    */
-  async function readBeacon() {
+  async function readBeacon(onCandidate) {
     var records = await Promise.all(BEACON_READS.map(function (url) {
       return fetchT(url, 4000)
-        .then(function (r) { return r.ok ? r.data : null; })
+        .then(async function (r) {
+          var record = r.ok ? r.data : null;
+          if (record && onCandidate) {
+            var urls = await verifyUrls(record);
+            if (urls.length) onCandidate(urls);
+          }
+          return record;
+        })
         .catch(function () { return null; });
     }));
     var best = null;
@@ -471,7 +478,45 @@
    * alive() is a real check here: /api/ping answers Access-Control-Allow-Origin
    * '*', so a file:// page (Origin: null) can make it. Verified 2026-09-11.
    */
+  // On first open, probe each authenticated address as soon as it is available.
+  // Store refresh still finishes and keeps the freshest verified record.
+  function resolveStartup() {
+    return new Promise(function (done) {
+      var seen = {};
+      var pending = 0;
+      var discovered = false;
+      var settled = false;
+      function finish() {
+        if (!settled && discovered && !pending) { settled = true; done(null); }
+      }
+      function probe(urls) {
+        urls.forEach(function (base) {
+          if (seen[base]) return;
+          seen[base] = true;
+          pending++;
+          alive(base).then(function (ok) {
+            if (ok && !settled) { settled = true; done(base); }
+          }).catch(function () {}).then(function () { pending--; finish(); });
+        });
+      }
+      // Only a fresh, signature-verified saved beacon can supply a shortcut.
+      pending++;
+      Promise.resolve().then(function () {
+        var saved = keptBeacon();
+        return saved ? verifyUrls(saved) : [];
+      }).then(probe).catch(function () {}).then(function () { pending--; finish(); });
+      readBeacon(probe).then(function (urls) {
+        probe(urls);
+        probe([FIXED]);
+      }).catch(function () { probe([FIXED]); }).then(function () {
+        discovered = true;
+        finish();
+      });
+    });
+  }
+
   async function resolve() {
+    if (!currentBase) return await resolveStartup();
     var list = await readBeacon();
     // The one we are already showing goes first: two healthy addresses must
     // not make the frame jump between them on every poll.
