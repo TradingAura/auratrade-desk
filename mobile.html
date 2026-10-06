@@ -117,6 +117,19 @@
   var frame = document.getElementById('frame');
   var retry = document.getElementById('retry');
   var currentBase = null;
+  var mobileShellStarted = false;
+  var mobileShellReady = false;
+  var mobileShellConnected = false;
+  function prepareMobileShell() {
+    if (!MOBILE_SHELL || mobileShellStarted) return;
+    mobileShellStarted = true;
+    frame.src = 'mobile-desk.html';
+  }
+  function connectMobileShell() {
+    if (!mobileShellReady || !currentBase || mobileShellConnected || !Array.isArray(mobileSnapshots[currentBase])) return;
+    mobileShellConnected = true;
+    frame.contentWindow.postMessage({ auratrade: true, type: 'mobile-connect', base: currentBase, key: KEY, snapshot: mobileSnapshots[currentBase] }, location.origin);
+  }
   var frameReadyTimer = null;
   var failedFrames = {};
   function deskReady() {
@@ -502,7 +515,15 @@
     // The key rides in the query string exactly as before; the desk pockets it
     // and strips it from ITS url. Nothing sensitive reaches this page's own bar.
     watchDeskReady(base);
-    frame.src = MOBILE_SHELL ? 'mobile-desk.html' : base + '/desk?key=' + encodeURIComponent(KEY);
+    if (MOBILE_SHELL) {
+      if (mobileShellConnected) {
+        mobileShellReady = false;
+        mobileShellConnected = false;
+        mobileShellStarted = false;
+      }
+      prepareMobileShell();
+      connectMobileShell();
+    } else frame.src = base + '/desk?key=' + encodeURIComponent(KEY);
     frame.style.display = 'block';
     shade.style.display = 'none';
   }
@@ -739,7 +760,8 @@
     if (MOBILE_SHELL && ev.origin !== location.origin) return;
     if (MOBILE_SHELL && d.type === 'mobile-ready') {
       connectionTrace('Mobile UI loaded');
-      frame.contentWindow.postMessage({ auratrade: true, type: 'mobile-connect', base: currentBase, key: KEY, snapshot: mobileSnapshots[currentBase] || [] }, location.origin);
+      mobileShellReady = true;
+      connectMobileShell();
       return;
     }
     if (MOBILE_SHELL && d.type === 'route-error' && currentBase && d.base === currentBase) {
@@ -805,6 +827,7 @@
    */
   async function start(k) {
     KEY = k;
+    prepareMobileShell();
     searching('Reading the beacon…');
     try {
       BEACON_READS = await beaconReadsFor(k);
