@@ -702,6 +702,7 @@
       var v = document.getElementById('k').value.trim();
       if (!v) return;
       try { localStorage.setItem(KEY_LS, v); } catch (e) {}
+      if (mobileConfig) { post({ type: 'mobile-key-change', key: v }); return; }
       boot();
     };
     document.getElementById('k').addEventListener('keydown', function (e) { if (e.key === 'Enter') document.getElementById('go').click(); });
@@ -2318,6 +2319,7 @@
         maybeAlert(sig);
         upsert(sig);
         lastStreamOk = Date.now();
+        post({ type: 'mobile-snapshot', base: serverBase, snapshot: signals });
         if (deskDataLoaded) render();
       } catch (e) {}
     };

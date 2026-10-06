@@ -147,7 +147,7 @@
   function prepareMobileShell() {
     if (!MOBILE_SHELL || mobileShellStarted) return;
     mobileShellStarted = true;
-    frame.src = 'mobile-desk-v3.html';
+    frame.src = 'mobile-desk-v4.html';
   }
   function connectMobileShell() {
     if (!mobileShellReady || !currentBase || mobileShellConnected || !Array.isArray(mobileSnapshots[currentBase])) return;
@@ -165,6 +165,7 @@
     deskReady();
     frameReadyTimer = setTimeout(function () {
       if (currentBase !== base) return;
+      checkGeneration++;
       failedFrames[base] = Date.now() + 45000;
       currentBase = null;
       frame.style.display = 'none';
@@ -174,6 +175,9 @@
     }, 20000);
   }
   var checking = false;
+  var checkGeneration = 0;
+  var checkAgain = false;
+  var recheckTimer = null;
 
   /**
    * SHA-256 AND HMAC WITHOUT crypto.subtle, AND THIS IS NOT A PREFERENCE.
@@ -517,8 +521,11 @@
   async function alive(base) {
     if (failedFrames[base] > Date.now()) return false;
     try {
+      var probeKey = KEY;
+      var probeGeneration = checkGeneration;
       var needsSnapshot = MOBILE_SHELL && !currentBase;
       var r = await fetchT(base + (needsSnapshot ? '/api/signals' : '/api/ping'), needsSnapshot ? 20000 : 15000, needsSnapshot ? { 'X-AuraTrade-Key': KEY } : null);
+      if (KEY !== probeKey || checkGeneration !== probeGeneration) return false;
       if (needsSnapshot) {
         if (!r.ok || !Array.isArray(r.data)) return false;
         mobileSnapshots[base] = r.data;
@@ -623,8 +630,8 @@
       }).then(probe).catch(function () {}).then(function () { pending--; finish(); });
       readBeacon(probe).then(function (urls) {
         probe(urls);
-        probe([FIXED]);
-      }).catch(function () { probe([FIXED]); }).then(function () {
+
+      }).catch(function () {}).then(function () {
         discovered = true;
         finish();
       });
@@ -648,7 +655,7 @@
       list = [currentBase].concat(list.filter(function (u) { return u !== currentBase; }));
     }
     // The fixed name is a last resort, not a step to wait through.
-    if (list.indexOf(FIXED) < 0) list.push(FIXED);
+    // Only signature-verified addresses may receive credentials.
     return await firstAlive(list);
   }
 
@@ -692,6 +699,7 @@
     if (!on && fastTimer) { clearInterval(fastTimer); fastTimer = null; }
   }
   function reconnecting() {
+    if (MOBILE_SHELL && savedMobileViewShown) { fastPoll(true); return; }
     shade.style.display = 'grid';
     frame.style.display = 'none';
     sp.style.display = 'block';
@@ -711,15 +719,18 @@
      * one that starts without a key.
      */
     if (!KEY) return;
-    if (checking) return;
+    if (checking) { if (initial) checkAgain = true; return; }
     checking = true;
+    var generation = checkGeneration;
     try {
       if (initial) searching('Reading the beacon…');
       var base = await resolve();
+      if (generation !== checkGeneration) return;
       if (base) { fastPoll(false); show(base); return; }
       // The beacon is silent. If the desk we already show still answers,
       // this is a beacon blip and the reader keeps reading.
-      if (currentBase && await alive(currentBase)) { fastPoll(false); show(currentBase); return; }
+      if (currentBase && await alive(currentBase)) { if (generation !== checkGeneration) return; fastPoll(false); show(currentBase); return; }
+      if (generation !== checkGeneration) return;
       if (!initial && currentBase && frame.style.display === 'block') { fastPoll(true); return; }
       if (currentBase) { reconnecting(); return; }
       /**
@@ -745,7 +756,10 @@
       if (Date.now() - hostSpokeAt < HOST_RECENT_MS) { reconnecting(); return; }
       stall(sawResponse ? DESK_DOWN : CANNOT_REACH);
       fastPoll(true);
-    } finally { checking = false; }
+    } finally {
+      checking = false;
+      if (checkAgain) { checkAgain = false; check(true).catch(function () {}); }
+    }
   }
 
   retry.addEventListener('click', function () { searching('Looking again…'); check(true); });
@@ -800,9 +814,26 @@
       previewMobileView();
       return;
     }
+    if (MOBILE_SHELL && d.type === 'mobile-key-change' && typeof d.key === 'string' && d.key.trim()) {
+      checkGeneration++;
+      cancelMobileProbes('');
+      KEY = d.key.trim();
+      deskReady();
+      shade.style.display = 'grid';
+      frame.style.display = 'none';
+      try { localStorage.setItem(KEY_LS, KEY); } catch (e) {}
+      currentBase = null;
+      mobileShellStarted = false;
+      mobileShellReady = false;
+      mobileShellConnected = false;
+      savedMobileViewShown = false;
+      start(KEY).catch(function () { stall(sawResponse ? DESK_DOWN : CANNOT_REACH); });
+      return;
+    }
     if (MOBILE_SHELL && d.type === 'mobile-snapshot' && currentBase && d.base === currentBase) { saveMobileView(d.snapshot); return; }
     if (MOBILE_SHELL && d.type === 'route-error' && currentBase && d.base === currentBase) {
       connectionTrace('Live stream interrupted; retrying backup');
+      checkGeneration++;
       failedFrames[currentBase] = Date.now() + 15000;
       currentBase = null;
       check(true);
@@ -864,10 +895,14 @@
    */
   async function start(k) {
     KEY = k;
+    var startGeneration = checkGeneration;
+    if (recheckTimer) clearInterval(recheckTimer);
     prepareMobileShell();
     searching('Reading the beacon…');
     try {
-      BEACON_READS = await beaconReadsFor(k);
+      var reads = await beaconReadsFor(k);
+      if (startGeneration !== checkGeneration) return;
+      BEACON_READS = reads;
     } catch (e) {
       BEACON_READS = [];
     }
@@ -876,7 +911,8 @@
     } catch (e) {
       stall(sawResponse ? DESK_DOWN : CANNOT_REACH);
     }
-    setInterval(function () { check(false); }, RECHECK_MS);
+    if (startGeneration !== checkGeneration) return;
+    recheckTimer = setInterval(function () { check(false); }, RECHECK_MS);
   }
   (function () {
     var k = KEY_BAKED;
